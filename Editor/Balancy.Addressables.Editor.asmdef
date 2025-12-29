@@ -1,0 +1,21 @@
+{
+    "name": "Balancy.Addressables.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:12f7493c5f0d14019bfa33a7b09ef512",
+        "GUID:69448af7b92c7f342b298e06a37122aa",
+        "GUID:422887e59947e44d786699df37519236",
+        "GUID:b3ce95f9580fc437bb3ce32ddbc2edd0"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

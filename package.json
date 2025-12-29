@@ -1,0 +1,43 @@
+{
+	"name": "co.balancy.unity-addressables",
+	"displayName": "Balancy Addressables",
+	"version": "1.0.0",
+	"unity": "2022.3",
+	"description": "Addressables module for Balancy, that comes with CDN and hosting.",
+	"keywords": [
+		"liveops",
+		"monetization",
+		"economy",
+		"game",
+		"development",
+		"revenue",
+		"ltv",
+		"game design",
+		"unity",
+		"balance",
+		"data",
+		"config",
+		"purchases",
+		"in-apps"
+	],
+	"homepage": "https://balancy.co/",
+	"bugs": {
+		"url": "https://github.com/balancy-liveops/plugin_cpp_unity_addressables/issues",
+		"email" : "contact@balancy.co"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/balancy-liveops/plugin_cpp_unity_addressables.git"
+	},
+	"license": "MIT",
+	"author": {
+		"name": "Balancy",
+		"email": "contact@balancy.co",
+		"url": "https://balancy.co/"
+	},
+	"dependencies": {
+		"com.unity.addressables": "2.7.6"
+	},
+	"documentationUrl": "https://en.docsv2.balancy.dev",
+	"changelogUrl": "https://en.docsv2.balancy.dev/release_notes/"
+}
