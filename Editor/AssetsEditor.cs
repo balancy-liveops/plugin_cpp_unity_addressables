@@ -6,7 +6,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using Balancy.Editor;
-using Newtonsoft.Json;
 using UnityEditor;
 using UnityEditor.AddressableAssets;
 using UnityEditor.AddressableAssets.Build;
@@ -550,6 +549,7 @@ namespace Balancy
             }
         }
         
+        [Serializable]
         private class FilesResponse : FullInfo
         {
             public string id;
@@ -581,7 +581,7 @@ namespace Balancy
                 {
                     if (!string.IsNullOrEmpty(response.downloadHandler.text))
                     {
-                        var filesResponse = JsonConvert.DeserializeObject<FilesResponse>(response.downloadHandler.text);
+                        var filesResponse = JsonUtility.FromJson<FilesResponse>(response.downloadHandler.text);
                         if (!string.IsNullOrEmpty(filesResponse.id))
                         {
                             List<string> fileNames = new List<string>();
@@ -775,6 +775,7 @@ namespace Balancy
             return string.Equals(group.Name, "Built In Data");
         }
 
+        [Serializable]
         private class FullInfo
         {
             public Constants.DevicePlatform platform;
@@ -797,6 +798,7 @@ namespace Balancy
             } 
         }
 
+        [Serializable]
         private class AddressablesGroup
         {
             public string guid;
@@ -809,22 +811,24 @@ namespace Balancy
             }
         }
 
+        [Serializable]
         private class BundleFileInfo
         {
             public string name;
         }
 
+        [Serializable]
         private class FileInfo
         {
-            [JsonIgnore] public UnityEngine.Object link;
-            [JsonIgnore] public string path;
-            [JsonIgnore] public string texturePath;
+            [NonSerialized] public UnityEngine.Object link;
+            [NonSerialized] public string path;
+            [NonSerialized] public string texturePath;
 
             public string guid;
             public string name;
             public string hash;
             public string[] labels;
-            [JsonIgnore] public string group;
+            [NonSerialized] public string group;
         }
 
         private class SynchAddressablesResponse

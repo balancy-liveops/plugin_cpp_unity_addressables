@@ -6,7 +6,6 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEngine.Networking;
-using Newtonsoft.Json;
 using UnityEngine;
 
 namespace Balancy.Editor
@@ -117,7 +116,7 @@ namespace Balancy.Editor
             if (request.Method == "POST")
             {
                 // For POST/PUT/PATCH/DELETE, use request body
-                return JsonConvert.SerializeObject(request.Body ?? new Dictionary<string, object>());
+                return SimpleJsonSerializer.SerializeDictionary(request.Body ?? new Dictionary<string, object>());
             }
             else
             {
@@ -147,25 +146,25 @@ namespace Balancy.Editor
         /// <summary>
         /// Checks request status by its ID
         /// </summary>
-        public IEnumerator CheckRequestStatus(string requestId, Action<string, Dictionary<string, object>> callback)
+        public IEnumerator CheckRequestStatus(string requestId, Action<string, string> callback)
         {
             var statusRequest = CreateRequest($"/v1/games/{_gameId}/requests/{requestId}", "GET");
             bool completed = false;
-            Dictionary<string, object> result = null;
+            string result = null;
             string status = null;
 
             SendRequest(statusRequest, request =>
             {
                 if (request.result == UnityWebRequest.Result.Success)
                 {
-                    var response = JsonConvert.DeserializeObject<Dictionary<string, object>>(request.downloadHandler.text);
-                    status = response["status"].ToString();
-                    result = response;
+                    result = request.downloadHandler.text;
+                    // Extract status from JSON manually
+                    status = SimpleJsonSerializer.ExtractStringValue(result, "status");
                 }
                 else
                 {
                     status = "failed";
-                    result = new Dictionary<string, object> { { "error", request.error } };
+                    result = "{\"error\":\"" + request.error + "\"}";
                 }
                 completed = true;
             });
