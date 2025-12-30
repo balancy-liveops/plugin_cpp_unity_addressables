@@ -51,6 +51,7 @@ namespace Balancy
         public static void Init()
         {
             _typedRequests.Clear();
+            Balancy.Controller.OnDataUpdated -= PrepareAddresses;
             Balancy.Controller.OnDataUpdated += PrepareAddresses;
             Balancy.Models.UnnyObject.OnLoadAssetAsSprite = GetSprite;
             Balancy.Models.UnnyObject.OnLoadAssetAsObject = GetObject;
