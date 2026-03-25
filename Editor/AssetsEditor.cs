@@ -1021,9 +1021,21 @@ namespace Balancy
             {
                 if (_currentBuildStep != BuildStep.Completed)
                 {
-                    if (GUILayout.Button("Start Build",
-                            GUILayout.Width(120)))
-                        StartBuildProcess();
+                    if (!IsIL2CPPBackendInstalled())
+                    {
+                        EditorGUILayout.HelpBox(
+                            "IL2CPP scripting backend is not installed for " +
+                            EditorUserBuildSettings.activeBuildTarget +
+                            ". Please install the IL2CPP module via Unity Hub.",
+                            MessageType.Error);
+                        if (GUILayout.Button("Install IL2CPP Module...", GUILayout.Width(200)))
+                            OpenUnityHub();
+                    }
+                    else
+                    {
+                        if (GUILayout.Button("Start Build", GUILayout.Width(120)))
+                            StartBuildProcess();
+                    }
                 }
             }
             else
@@ -1112,6 +1124,75 @@ namespace Balancy
 
         #endregion
         
+        private static bool IsIL2CPPBackendInstalled()
+        {
+            var target = EditorUserBuildSettings.activeBuildTarget;
+            var targetGroup = BuildPipeline.GetBuildTargetGroup(target);
+            var backend = PlayerSettings.GetScriptingBackend(targetGroup);
+
+            if (backend != ScriptingImplementation.IL2CPP)
+                return true;
+
+            string playbackEnginesPath = Path.Combine(EditorApplication.applicationContentsPath, "PlaybackEngines");
+            string variationsFolder = null;
+
+            switch (target)
+            {
+                case BuildTarget.StandaloneWindows:
+                case BuildTarget.StandaloneWindows64:
+                    variationsFolder = Path.Combine(playbackEnginesPath, "windowsstandalonesupport", "Variations");
+                    break;
+                case BuildTarget.StandaloneOSX:
+                    variationsFolder = Path.Combine(playbackEnginesPath, "MacStandaloneSupport", "Variations");
+                    break;
+                case BuildTarget.StandaloneLinux64:
+                    variationsFolder = Path.Combine(playbackEnginesPath, "LinuxStandaloneSupport", "Variations");
+                    break;
+                default:
+                    return true;
+            }
+
+            if (variationsFolder != null && Directory.Exists(variationsFolder))
+                return Directory.GetDirectories(variationsFolder, "*il2cpp*").Length > 0;
+
+            return false;
+        }
+
+        private static void OpenUnityHub()
+        {
+            string[] possiblePaths;
+
+            if (Application.platform == RuntimePlatform.WindowsEditor)
+            {
+                possiblePaths = new[]
+                {
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Unity Hub", "Unity Hub.exe"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Unity Hub", "Unity Hub.exe"),
+                };
+            }
+            else if (Application.platform == RuntimePlatform.OSXEditor)
+            {
+                possiblePaths = new[] { "/Applications/Unity Hub.app/Contents/MacOS/Unity Hub" };
+            }
+            else
+            {
+                possiblePaths = new[] { "/usr/bin/unityhub" };
+            }
+
+            foreach (var path in possiblePaths)
+            {
+                if (File.Exists(path))
+                {
+                    System.Diagnostics.Process.Start(path);
+                    return;
+                }
+            }
+
+            EditorUtility.DisplayDialog("Unity Hub Not Found",
+                "Please open Unity Hub manually and install the IL2CPP module for Unity " + Application.unityVersion + ".",
+                "OK");
+        }
+
         public static Balancy.Constants.DevicePlatform ConvertBuildTargetToDevicePlatform(BuildTarget target)
         {
             switch (target)
