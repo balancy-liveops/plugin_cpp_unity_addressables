@@ -55,6 +55,7 @@ namespace Balancy
         {
             _editorAuth = editorAuth;
             _privateKey = _editorAuth.GetPrivateKey();
+            _completionNotified = false;
 
             _gameInfo = new GameInfo
             {
@@ -63,9 +64,24 @@ namespace Balancy
                 BranchId = branchId,
                 BranchName = branchName,
                 OnProgress = onProgress,
-                OnComplete = onComplete,
+                OnComplete = (msg) =>
+                {
+                    _completionNotified = true;
+                    onComplete?.Invoke(msg);
+                },
                 OnStart = onStart
             };
+        }
+
+        private void OnDestroy()
+        {
+            EditorApplication.update -= UpdateBuildProgress;
+
+            if (!_completionNotified)
+            {
+                _completionNotified = true;
+                _gameInfo?.OnComplete?.Invoke("Addressables sync was cancelled.");
+            }
         }
 
         private void OnGUI()
@@ -872,6 +888,7 @@ namespace Balancy
         private string _currentStepDetails = "";
 
         private GameInfo _gameInfo;
+        private bool _completionNotified;
 
         private void DeleteUpFolder()
         {
