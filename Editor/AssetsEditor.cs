@@ -25,7 +25,8 @@ namespace Balancy
         private const string BalancyDataRoot = "Library/BalancyData/";
         private const string CustomProfileName = "BalancyProfile";
         private const string RemoteBuildPath = BalancyDataRoot + "[BuildTarget]"; // Where assets will be built
-        private const string RemoteLoadPath = "{BALANCY_URL}/"; // Where assets will be loaded from
+        private const string RemoteLoadPath = "BALANCY_URL/"; // Where assets will be loaded from
+        private const string LegacyRemoteLoadPath = "{BALANCY_URL}/"; // Old format with braces
 
         private bool _section2Expanded = true;
 
@@ -111,8 +112,23 @@ namespace Balancy
 
             if (isBalancyProfileActive)
             {
-                EditorGUILayout.HelpBox("Balancy Profile is active. You can proceed with the next steps.",
-                    MessageType.Info);
+                var settings = AddressableAssetSettingsDefaultObject.Settings;
+                if (HasLegacyLoadPath(settings))
+                {
+                    EditorGUILayout.HelpBox(
+                        "Balancy Profile uses the old load path format with {braces}. This can cause issues with some Unity versions. Please update it.",
+                        MessageType.Warning);
+
+                    if (GUILayout.Button("Fix Load Path"))
+                    {
+                        CreateAndActivateCustomProfile(RemoteBuildPath, RemoteLoadPath);
+                    }
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox("Balancy Profile is active. You can proceed with the next steps.",
+                        MessageType.Info);
+                }
             }
             else
             {
@@ -178,15 +194,18 @@ namespace Balancy
 
                                 BundledAssetGroupSchema bundleSchema = group.GetSchema<BundledAssetGroupSchema>();
                                 bool balancySetup = false;
+                                bool legacySetup = false;
 
                                 if (bundleSchema != null)
                                 {
                                     bool usingRemoteBuildPaths = bundleSchema.BuildPath.GetValue(settings)
                                         .StartsWith(BalancyDataRoot);
-                                    bool usingRemotePaths = bundleSchema.LoadPath.GetValue(settings)
-                                        .StartsWith(RemoteLoadPath);
-                                    
+                                    string loadPathValue = bundleSchema.LoadPath.GetValue(settings);
+                                    bool usingRemotePaths = loadPathValue.StartsWith(RemoteLoadPath);
+                                    bool usingLegacyPaths = !usingRemotePaths && loadPathValue.Contains("{");
+
                                     balancySetup = usingRemotePaths && usingRemoteBuildPaths;
+                                    legacySetup = usingLegacyPaths && usingRemoteBuildPaths;
                                 }
 
                                 EditorGUILayout.BeginHorizontal();
@@ -204,6 +223,17 @@ namespace Balancy
                                     GUI.color = Color.white;
 
                                     EditorGUILayout.LabelField("Balancy Configuration", EditorStyles.miniLabel);
+                                }
+                                else if (legacySetup)
+                                {
+                                    GUIStyle warningStyle = new GUIStyle(EditorStyles.miniLabel);
+                                    warningStyle.normal.textColor = new Color(0.9f, 0.6f, 0.1f); // Orange
+                                    EditorGUILayout.LabelField("Legacy Load Path ({braces})", warningStyle);
+
+                                    if (GUILayout.Button("Update Path", GUILayout.Width(140)))
+                                    {
+                                        CreateAndActivateCustomProfile(RemoteBuildPath, RemoteLoadPath);
+                                    }
                                 }
                                 else
                                 {
@@ -387,6 +417,32 @@ namespace Balancy
             string customProfileId = settings.profileSettings.GetProfileId(CustomProfileName);
 
             return activeProfileId == customProfileId;
+        }
+
+        private static string GetProfileRemoteLoadPath(AddressableAssetSettings settings)
+        {
+            if (settings == null)
+                return null;
+
+            var profileId = settings.profileSettings.GetProfileId(CustomProfileName);
+            if (string.IsNullOrEmpty(profileId))
+                return null;
+
+            var allVariableNames = settings.profileSettings.GetVariableNames();
+            string[] candidates = { AddressableAssetSettings.kRemoteLoadPath, "RemoteLoadPath", "Remote.LoadPath" };
+            foreach (var v in candidates)
+            {
+                if (allVariableNames.Contains(v))
+                    return settings.profileSettings.GetValueByName(profileId, v);
+            }
+
+            return null;
+        }
+
+        private static bool HasLegacyLoadPath(AddressableAssetSettings settings)
+        {
+            var value = GetProfileRemoteLoadPath(settings);
+            return value != null && value.Contains("{");
         }
 
         private static string GetBuildPath()
