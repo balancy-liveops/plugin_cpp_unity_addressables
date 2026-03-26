@@ -13,6 +13,9 @@ using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEngine;
 using UnityEngine.Networking;
+#if UNITY_2021_2_OR_NEWER
+using UnityEditor.Build;
+#endif
 
 namespace Balancy
 {
@@ -1145,7 +1148,11 @@ namespace Balancy
         {
             var target = EditorUserBuildSettings.activeBuildTarget;
             var targetGroup = BuildPipeline.GetBuildTargetGroup(target);
+#if UNITY_2021_2_OR_NEWER
+            var backend = PlayerSettings.GetScriptingBackend(NamedBuildTarget.FromBuildTargetGroup(targetGroup));
+#else
             var backend = PlayerSettings.GetScriptingBackend(targetGroup);
+#endif
 
             if (backend != ScriptingImplementation.IL2CPP)
                 return true;
