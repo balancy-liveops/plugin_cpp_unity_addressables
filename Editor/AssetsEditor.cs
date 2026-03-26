@@ -267,6 +267,7 @@ namespace Balancy
 
             bundleSchema.IncludeInBuild = true;
 
+            EditorUtility.SetDirty(bundleSchema);
             EditorUtility.SetDirty(group);
             EditorUtility.SetDirty(settings);
             AssetDatabase.SaveAssets();
