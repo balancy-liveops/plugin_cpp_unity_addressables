@@ -32,6 +32,7 @@ namespace Balancy
 
         // private bool _section3Expanded = false;
         private string _privateKey;
+        private bool _deployAfterSync;
 
         private void Awake()
         {
@@ -635,7 +636,22 @@ namespace Balancy
         {
             return UnityWebRequest.EscapeURL(branchName);
         }
-        
+
+        private void CallDeploy(GameInfo gameInfo, Action<bool, string> callback)
+        {
+            var request = _wrapper.CreateRequest(
+                $"/v1/games/{gameInfo.GameId}/branches/{ConvertBranchName(gameInfo.BranchName)}/deploy",
+                "POST");
+            _wrapper.SendRequest(request, response =>
+            {
+                var success = response.result == UnityWebRequest.Result.Success;
+                string error = success ? null : response.error;
+                if (!success)
+                    Debug.LogError("Deploy failed: " + error);
+                callback?.Invoke(success, error);
+            });
+        }
+
         private void SendInfoToServer(FullInfo info, GameInfo gameInfo, Action<bool> callback)
         {
             var request = _wrapper.CreateRequest($"/v1/games/{gameInfo.GameId}/branches/{ConvertBranchName(gameInfo.BranchName)}/bundles", "POST");
@@ -1006,8 +1022,8 @@ namespace Balancy
                 {
                     complete = true;
                     success = _success;
-
-                    if (success)
+                    
+                    if (success && !_deployAfterSync)
                         _gameInfo.OnComplete?.Invoke(null);
                 });
                 
@@ -1017,6 +1033,37 @@ namespace Balancy
                 if (!success)
                 {
                     _currentStepDetails = "Sync Assets failed!";
+                    _currentBuildStep = BuildStep.Error;
+                    EditorApplication.update -= UpdateBuildProgress;
+                    Repaint();
+                    return;
+                }
+            }
+
+            if (_deployAfterSync)
+            {
+                _currentStepDetails = "Deploying...";
+                bool deployComplete = false;
+                bool deploySuccess = false;
+                string deployError = null;
+                CallDeploy(_gameInfo, (s, error) =>
+                {
+                    deployComplete = true;
+                    deploySuccess = s;
+                    deployError = error;
+                });
+
+                while (!deployComplete)
+                    await Task.Delay(100);
+
+                if (deploySuccess)
+                {
+                    _gameInfo.OnComplete?.Invoke(null);
+                }
+                else
+                {
+                    _gameInfo.OnComplete?.Invoke(deployError);
+                    _currentStepDetails = "Deploy failed!";
                     _currentBuildStep = BuildStep.Error;
                     EditorApplication.update -= UpdateBuildProgress;
                     Repaint();
@@ -1089,6 +1136,19 @@ namespace Balancy
             }
 
             EditorGUILayout.Space();
+
+            if (_currentBuildStep == BuildStep.NotStarted)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                _deployAfterSync = EditorGUILayout.ToggleLeft("Deploy after sync", _deployAfterSync, GUILayout.Width(120));
+                var helpIcon = EditorGUIUtility.IconContent("_Help");
+                var helpRect = GUILayoutUtility.GetRect(helpIcon, GUIStyle.none, GUILayout.Width(36), GUILayout.Height(24));
+                GUI.Label(helpRect, new GUIContent(helpIcon.image, "It will start deploy process on the Balancy's dashboard and will deploy all changes after sync. Be careful."));
+                GUILayout.FlexibleSpace();
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.Space();
+            }
 
             // Start or reset button
             EditorGUILayout.BeginHorizontal();
