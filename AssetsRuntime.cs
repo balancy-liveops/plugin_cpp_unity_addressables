@@ -46,22 +46,65 @@ namespace Balancy
         }
         
         private static readonly Dictionary<string, TypedRequests> _typedRequests = new Dictionary<string, TypedRequests>();
-        
+
+        private static bool _catalogReady;
+        private static string _catalogUpdateUrl;
+        private static List<Action> _pendingLoads;
+
         [RuntimeInitializeOnLoadMethod]
         public static void Init()
         {
             _typedRequests.Clear();
+            _catalogReady = false;
+            _catalogUpdateUrl = null;
+            _pendingLoads = new List<Action>();
+            _localBundleNames = null;
             Balancy.Controller.OnDataUpdated -= PrepareAddresses;
             Balancy.Controller.OnDataUpdated += PrepareAddresses;
             Balancy.Models.UnnyObject.OnLoadAssetAsSprite = GetSprite;
             Balancy.Models.UnnyObject.OnLoadAssetAsObject = GetObject;
         }
 
+        private static HashSet<string> _localBundleNames;
+
+        private static void CacheLocalBundles()
+        {
+            _localBundleNames = new HashSet<string>();
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using (var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                using (var activity = player.GetStatic<AndroidJavaObject>("currentActivity"))
+                using (var assets = activity.Call<AndroidJavaObject>("getAssets"))
+                {
+                    string[] files = assets.Call<string[]>("list", "aa/Android");
+                    if (files != null)
+                        foreach (var f in files)
+                            if (f.EndsWith(".bundle"))
+                                _localBundleNames.Add(f);
+                }
+                Debug.Log($"Balancy: CacheLocalBundles found {_localBundleNames.Count} local bundle(s)");
+                foreach (var b in _localBundleNames)
+                    Debug.Log($"Balancy:   local bundle: {b}");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("Balancy: Failed to enumerate local bundles: " + e.Message);
+            }
+#else
+            Debug.Log($"Balancy: CacheLocalBundles found {_localBundleNames.Count} local bundle(s)");
+#endif
+        }
+
         private static void PrepareAddresses(bool dataUpdated, bool profileChanged)
         {
             var url = GetAddressablesUrl();
+            Debug.Log($"Balancy: PrepareAddresses URL={url}");
             if (string.IsNullOrEmpty(url))
                 return;
+
+            if (_localBundleNames == null)
+                CacheLocalBundles();
 
             UnityEngine.AddressableAssets.Addressables.InternalIdTransformFunc = (location) => {
                 string id = location.InternalId;
@@ -71,8 +114,129 @@ namespace Balancy
                     return newId;
                 }
 
+                // For non-HTTP .bundle paths: load locally if bundle exists, else redirect to CDN.
+                if (id.EndsWith(".bundle") && !id.StartsWith("http"))
+                {
+                    string bundleName = id.Substring(id.LastIndexOf('/') + 1);
+#if UNITY_ANDROID && !UNITY_EDITOR
+                    // On Android, File.Exists doesn't work for jar: paths — use cached APK listing
+                    if (_localBundleNames != null && _localBundleNames.Contains(bundleName))
+                    {
+                        Debug.Log($"Balancy: Bundle '{bundleName}' found locally, using local path");
+                        return id;
+                    }
+#else
+                    // On other platforms, check filesystem directly
+                    if (System.IO.File.Exists(id))
+                    {
+                        Debug.Log($"Balancy: Bundle '{bundleName}' found locally at '{id}'");
+                        return id;
+                    }
+#endif
+                    // Bundle not found locally — redirect to CDN
+                    var cdnUrl = url.TrimEnd('/') + "/" + bundleName;
+                    var cached = false;
+                    if (location.Data is UnityEngine.ResourceManagement.ResourceProviders.AssetBundleRequestOptions options && !string.IsNullOrEmpty(options.Hash))
+                    {
+                        cached = Caching.IsVersionCached(cdnUrl, Hash128.Parse(options.Hash));
+                    }
+                    Debug.Log($"Balancy: Bundle '{bundleName}' not found locally, redirecting to CDN (cached: {cached})");
+                    return cdnUrl;
+                }
+
                 return id;
             };
+
+            TriggerCatalogUpdate(url);
+        }
+
+        private static void TriggerCatalogUpdate(string url)
+        {
+            Debug.Log($"Balancy: TriggerCatalogUpdate url={url}");
+
+            // If same URL already triggered, skip
+            if (_catalogUpdateUrl == url)
+                return;
+
+            // Reset if URL changed (previous attempt used stale URL)
+            if (_catalogUpdateUrl != null)
+            {
+                Debug.Log($"Balancy: URL changed from previous trigger, retrying catalog update");
+                _catalogReady = false;
+            }
+
+            _catalogUpdateUrl = url;
+
+            // Safety timeout: proceed with local catalog if update takes too long
+            Tasks.Wait(15, () =>
+            {
+                if (!_catalogReady)
+                {
+                    Debug.LogWarning("Balancy: Catalog update timed out, proceeding with local catalog");
+                    OnCatalogReady();
+                }
+            });
+
+            UnityEngine.AddressableAssets.Addressables.CheckForCatalogUpdates().Completed += checkOp =>
+            {
+                // If URL changed while we were waiting, ignore this stale result
+                if (_catalogUpdateUrl != url)
+                {
+                    Debug.Log("Balancy: Ignoring stale CheckForCatalogUpdates result (URL changed)");
+                    return;
+                }
+
+                Debug.Log($"Balancy: CheckForCatalogUpdates Status={checkOp.Status}, Count={checkOp.Result?.Count ?? -1}");
+
+                if (checkOp.Status == AsyncOperationStatus.Succeeded
+                    && checkOp.Result != null
+                    && checkOp.Result.Count > 0)
+                {
+                    UnityEngine.AddressableAssets.Addressables.UpdateCatalogs(checkOp.Result).Completed += updateOp =>
+                    {
+                        if (updateOp.Status == AsyncOperationStatus.Succeeded)
+                            Debug.Log("Balancy: Addressables catalogs updated from CDN");
+                        else
+                            Debug.LogWarning("Balancy: Failed to update Addressables catalogs");
+                        OnCatalogReady();
+                    };
+                }
+                else
+                {
+                    Debug.Log("Balancy: No catalog updates found, using current catalog");
+                    OnCatalogReady();
+                }
+            };
+        }
+
+        private static void OnCatalogReady()
+        {
+            _catalogReady = true;
+            if (_pendingLoads != null && _pendingLoads.Count > 0)
+            {
+                Debug.Log($"Balancy: Catalog ready, flushing {_pendingLoads.Count} pending load(s)");
+                var loads = new List<Action>(_pendingLoads);
+                _pendingLoads.Clear();
+                foreach (var load in loads)
+                    load?.Invoke();
+            }
+        }
+
+        private static string TryResolveKey(string name)
+        {
+            string fileName = System.IO.Path.GetFileName(name);
+            foreach (var locator in UnityEngine.AddressableAssets.Addressables.ResourceLocators)
+            {
+                foreach (var key in locator.Keys)
+                {
+                    if (key is string s && s.EndsWith("/" + fileName))
+                    {
+                        Debug.Log($"Balancy: Resolved key '{name}' -> '{s}'");
+                        return s;
+                    }
+                }
+            }
+            return null;
         }
 
         private static string GetAddressablesUrl()
@@ -152,6 +316,12 @@ namespace Balancy
         
         private static void CheckAndPrepareObject<T>(string name, Action<Object> callback) where T : Object
         {
+            if (!_catalogReady)
+            {
+                _pendingLoads.Add(() => CheckAndPrepareObject<T>(name, callback));
+                return;
+            }
+
             var typeString = typeof(T).ToString();
             if (!_typedRequests.TryGetValue(typeString, out var typedRequests))
             {
@@ -199,6 +369,24 @@ namespace Balancy
                         else
                         {
                             Debug.LogError("Couldn't load asset by name " + name);
+                            var resolvedKey = TryResolveKey(name);
+                            if (resolvedKey != null)
+                            {
+                                UnityEngine.AddressableAssets.Addressables.LoadAssetAsync<T>(resolvedKey).Completed += retryResult =>
+                                {
+                                    Object retryObj = null;
+                                    if (retryResult.Status == AsyncOperationStatus.Succeeded)
+                                    {
+                                        var loadedObject = new LoadedObject(retryResult.Result);
+                                        typedRequests.LoadedObjects.Add(name, loadedObject);
+                                        retryObj = loadedObject.GetObject();
+                                    }
+                                    else
+                                        Debug.LogError("Couldn't load asset by resolved name " + resolvedKey);
+                                    invokeCallbacksAndCleanUp(retryObj);
+                                };
+                                return;
+                            }
                         }
 
                         invokeCallbacksAndCleanUp(obj);
