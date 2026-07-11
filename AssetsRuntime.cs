@@ -19,8 +19,18 @@ namespace Balancy
 #endif
         
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        
+
         public static extern IntPtr balancyGetAddressablesUrl(int devicePlatform);
+
+        /// <summary>
+        /// Debug logging for the addressables routing (local vs CDN). Compiled away unless
+        /// the BALANCY_ADDRESSABLES_DEBUG scripting define symbol is set.
+        /// </summary>
+        [System.Diagnostics.Conditional("BALANCY_ADDRESSABLES_DEBUG")]
+        private static void DebugLog(string message)
+        {
+            Debug.Log("[Balancy.Addressables] " + message);
+        }
         
         private class LoadedObject
         {
@@ -83,23 +93,23 @@ namespace Balancy
                             if (f.EndsWith(".bundle"))
                                 _localBundleNames.Add(f);
                 }
-                Debug.Log($"Balancy: CacheLocalBundles found {_localBundleNames.Count} local bundle(s)");
+                DebugLog($"CacheLocalBundles found {_localBundleNames.Count} local bundle(s)");
                 foreach (var b in _localBundleNames)
-                    Debug.Log($"Balancy:   local bundle: {b}");
+                    DebugLog($"  local bundle: {b}");
             }
             catch (Exception e)
             {
                 Debug.LogWarning("Balancy: Failed to enumerate local bundles: " + e.Message);
             }
 #else
-            Debug.Log($"Balancy: CacheLocalBundles found {_localBundleNames.Count} local bundle(s)");
+            DebugLog($"CacheLocalBundles found {_localBundleNames.Count} local bundle(s)");
 #endif
         }
 
         private static void PrepareAddresses(bool dataUpdated, bool profileChanged)
         {
             var url = GetAddressablesUrl();
-            Debug.Log($"Balancy: PrepareAddresses URL={url}");
+            DebugLog($"PrepareAddresses URL={url}");
             if (string.IsNullOrEmpty(url))
                 return;
 
@@ -111,6 +121,7 @@ namespace Balancy
                 if (id.StartsWith("BALANCY_URL"))
                 {
                     var newId = id.Replace("//", "/").Replace("BALANCY_URL", url);
+                    DebugLog($"CDN (remote group): '{id}' -> '{newId}'");
                     return newId;
                 }
 
@@ -122,14 +133,14 @@ namespace Balancy
                     // On Android, File.Exists doesn't work for jar: paths — use cached APK listing
                     if (_localBundleNames != null && _localBundleNames.Contains(bundleName))
                     {
-                        Debug.Log($"Balancy: Bundle '{bundleName}' found locally, using local path");
+                        DebugLog($"LOCAL: bundle '{bundleName}' found in the APK, using '{id}'");
                         return id;
                     }
 #else
                     // On other platforms, check filesystem directly
                     if (System.IO.File.Exists(id))
                     {
-                        Debug.Log($"Balancy: Bundle '{bundleName}' found locally at '{id}'");
+                        DebugLog($"LOCAL: bundle '{bundleName}' found on disk at '{id}'");
                         return id;
                     }
 #endif
@@ -140,7 +151,7 @@ namespace Balancy
                     {
                         cached = Caching.IsVersionCached(cdnUrl, Hash128.Parse(options.Hash));
                     }
-                    Debug.Log($"Balancy: Bundle '{bundleName}' not found locally, redirecting to CDN (cached: {cached})");
+                    DebugLog($"CDN (fallback): bundle '{bundleName}' not found locally -> '{cdnUrl}' (cached: {cached})");
                     return cdnUrl;
                 }
 
@@ -152,7 +163,7 @@ namespace Balancy
 
         private static void TriggerCatalogUpdate(string url)
         {
-            Debug.Log($"Balancy: TriggerCatalogUpdate url={url}");
+            DebugLog($"TriggerCatalogUpdate url={url}");
 
             // If same URL already triggered, skip
             if (_catalogUpdateUrl == url)
@@ -161,7 +172,7 @@ namespace Balancy
             // Reset if URL changed (previous attempt used stale URL)
             if (_catalogUpdateUrl != null)
             {
-                Debug.Log($"Balancy: URL changed from previous trigger, retrying catalog update");
+                DebugLog("URL changed from previous trigger, retrying catalog update");
                 _catalogReady = false;
             }
 
@@ -182,11 +193,11 @@ namespace Balancy
                 // If URL changed while we were waiting, ignore this stale result
                 if (_catalogUpdateUrl != url)
                 {
-                    Debug.Log("Balancy: Ignoring stale CheckForCatalogUpdates result (URL changed)");
+                    DebugLog("Ignoring stale CheckForCatalogUpdates result (URL changed)");
                     return;
                 }
 
-                Debug.Log($"Balancy: CheckForCatalogUpdates Status={checkOp.Status}, Count={checkOp.Result?.Count ?? -1}");
+                DebugLog($"CheckForCatalogUpdates Status={checkOp.Status}, Count={checkOp.Result?.Count ?? -1}");
 
                 if (checkOp.Status == AsyncOperationStatus.Succeeded
                     && checkOp.Result != null
@@ -195,7 +206,7 @@ namespace Balancy
                     UnityEngine.AddressableAssets.Addressables.UpdateCatalogs(checkOp.Result).Completed += updateOp =>
                     {
                         if (updateOp.Status == AsyncOperationStatus.Succeeded)
-                            Debug.Log("Balancy: Addressables catalogs updated from CDN");
+                            DebugLog("Addressables catalogs updated from CDN");
                         else
                             Debug.LogWarning("Balancy: Failed to update Addressables catalogs");
                         OnCatalogReady();
@@ -203,7 +214,7 @@ namespace Balancy
                 }
                 else
                 {
-                    Debug.Log("Balancy: No catalog updates found, using current catalog");
+                    DebugLog("No catalog updates found, using current catalog");
                     OnCatalogReady();
                 }
             };
@@ -214,7 +225,7 @@ namespace Balancy
             _catalogReady = true;
             if (_pendingLoads != null && _pendingLoads.Count > 0)
             {
-                Debug.Log($"Balancy: Catalog ready, flushing {_pendingLoads.Count} pending load(s)");
+                DebugLog($"Catalog ready, flushing {_pendingLoads.Count} pending load(s)");
                 var loads = new List<Action>(_pendingLoads);
                 _pendingLoads.Clear();
                 foreach (var load in loads)
@@ -231,7 +242,7 @@ namespace Balancy
                 {
                     if (key is string s && s.EndsWith("/" + fileName))
                     {
-                        Debug.Log($"Balancy: Resolved key '{name}' -> '{s}'");
+                        DebugLog($"Resolved key '{name}' -> '{s}'");
                         return s;
                     }
                 }
@@ -273,7 +284,7 @@ namespace Balancy
                 else
                 {
                     // Fallback: Try loading as Texture2D and convert to Sprite
-                    Debug.Log($"Failed to load as Sprite, trying Texture2D for: {name}");
+                    DebugLog($"Failed to load as Sprite, trying Texture2D for: {name}");
                     GetAsset<Texture2D>(name, texture =>
                     {
                         if (texture != null)
