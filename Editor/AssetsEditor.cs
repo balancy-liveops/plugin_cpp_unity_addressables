@@ -13,6 +13,9 @@ using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEngine;
 using UnityEngine.Networking;
+#if UNITY_2021_2_OR_NEWER
+using UnityEditor.Build;
+#endif
 
 namespace Balancy
 {
@@ -22,12 +25,24 @@ namespace Balancy
         private const string BalancyDataRoot = "Library/BalancyData/";
         private const string CustomProfileName = "BalancyProfile";
         private const string RemoteBuildPath = BalancyDataRoot + "[BuildTarget]"; // Where assets will be built
-        private const string RemoteLoadPath = "{BALANCY_URL}/"; // Where assets will be loaded from
+        private const string RemoteLoadPath = "BALANCY_URL/"; // Where assets will be loaded from
+        private const string LegacyRemoteLoadPath = "{BALANCY_URL}/"; // Old format with braces
 
         private bool _section2Expanded = true;
 
         // private bool _section3Expanded = false;
         private string _privateKey;
+        private bool _deployAfterSync;
+        private readonly Dictionary<string, bool> _expandedGroupFiles = new Dictionary<string, bool>();
+
+        private enum GroupSetup
+        {
+            Remote, // Built to BalancyData and uploaded to Balancy CDN
+            Legacy, // Balancy setup, but with the old {braces} load path
+            Local, // Built into the app (default Unity local paths), not uploaded
+            Custom, // Anything else
+            NoSchema
+        }
 
         private void Awake()
         {
@@ -55,6 +70,7 @@ namespace Balancy
         {
             _editorAuth = editorAuth;
             _privateKey = _editorAuth.GetPrivateKey();
+            _completionNotified = false;
 
             _gameInfo = new GameInfo
             {
@@ -63,9 +79,24 @@ namespace Balancy
                 BranchId = branchId,
                 BranchName = branchName,
                 OnProgress = onProgress,
-                OnComplete = onComplete,
+                OnComplete = (msg) =>
+                {
+                    _completionNotified = true;
+                    onComplete?.Invoke(msg);
+                },
                 OnStart = onStart
             };
+        }
+
+        private void OnDestroy()
+        {
+            EditorApplication.update -= UpdateBuildProgress;
+
+            if (!_completionNotified)
+            {
+                _completionNotified = true;
+                _gameInfo?.OnComplete?.Invoke("Addressables sync was cancelled.");
+            }
         }
 
         private void OnGUI()
@@ -92,8 +123,23 @@ namespace Balancy
 
             if (isBalancyProfileActive)
             {
-                EditorGUILayout.HelpBox("Balancy Profile is active. You can proceed with the next steps.",
-                    MessageType.Info);
+                var settings = AddressableAssetSettingsDefaultObject.Settings;
+                if (HasLegacyLoadPath(settings))
+                {
+                    EditorGUILayout.HelpBox(
+                        "Balancy Profile uses the old load path format with {braces}. This can cause issues with some Unity versions. Please update it.",
+                        MessageType.Warning);
+
+                    if (GUILayout.Button("Fix Load Path"))
+                    {
+                        CreateAndActivateCustomProfile(RemoteBuildPath, RemoteLoadPath);
+                    }
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox("Balancy Profile is active. You can proceed with the next steps.",
+                        MessageType.Info);
+                }
             }
             else
             {
@@ -154,58 +200,7 @@ namespace Balancy
                         {
                             var group = settings.groups[i];
                             if (group != null && !ShouldExcludeGroup(group))
-                            {
-                                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-
-                                BundledAssetGroupSchema bundleSchema = group.GetSchema<BundledAssetGroupSchema>();
-                                bool balancySetup = false;
-
-                                if (bundleSchema != null)
-                                {
-                                    bool usingRemoteBuildPaths = bundleSchema.BuildPath.GetValue(settings)
-                                        .StartsWith(BalancyDataRoot);
-                                    bool usingRemotePaths = bundleSchema.LoadPath.GetValue(settings)
-                                        .StartsWith(RemoteLoadPath);
-                                    
-                                    balancySetup = usingRemotePaths && usingRemoteBuildPaths;
-                                }
-
-                                EditorGUILayout.BeginHorizontal();
-
-                                EditorGUILayout.LabelField(group.Name, EditorStyles.boldLabel, GUILayout.MaxWidth(200));
-
-                                GUILayout.FlexibleSpace();
-
-                                if (balancySetup)
-                                {
-                                    Rect checkRect = EditorGUILayout.GetControlRect(false, 20, GUILayout.Width(20));
-                                    EditorGUI.DrawRect(checkRect, new Color(0.2f, 0.7f, 0.2f, 0.8f));
-                                    GUI.color = Color.white;
-                                    EditorGUI.LabelField(checkRect, "✓", EditorStyles.centeredGreyMiniLabel);
-                                    GUI.color = Color.white;
-
-                                    EditorGUILayout.LabelField("Balancy Configuration", EditorStyles.miniLabel);
-                                }
-                                else
-                                {
-                                    GUIStyle warningStyle = new GUIStyle(EditorStyles.miniLabel);
-                                    warningStyle.normal.textColor = new Color(0.9f, 0.6f, 0.1f); // Orange
-                                    EditorGUILayout.LabelField("Custom Configuration", warningStyle);
-
-                                    if (GUILayout.Button("Configure for Balancy", GUILayout.Width(140)))
-                                    {
-                                        ConfigureGroupForBalancy(group);
-                                    }
-                                }
-
-                                EditorGUILayout.EndHorizontal();
-
-                                if (group.entries != null)
-                                    EditorGUILayout.LabelField($"Assets: {group.entries.Count}");
-
-                                EditorGUILayout.EndVertical();
-                                EditorGUILayout.Space(5);
-                            }
+                                RenderGroup(settings, group);
                         }
                     }
                 }
@@ -214,7 +209,178 @@ namespace Balancy
             EditorGUILayout.EndVertical();
         }
 
+        private static readonly string[] RemoteBuildPathVariables =
+            { AddressableAssetSettings.kRemoteBuildPath, "RemoteBuildPath", "Remote.BuildPath" };
+
+        private static readonly string[] RemoteLoadPathVariables =
+            { AddressableAssetSettings.kRemoteLoadPath, "RemoteLoadPath", "Remote.LoadPath" };
+
+        private static readonly string[] LocalBuildPathVariables =
+            { AddressableAssetSettings.kLocalBuildPath, "LocalBuildPath", "Local.BuildPath" };
+
+        private static readonly string[] LocalLoadPathVariables =
+            { AddressableAssetSettings.kLocalLoadPath, "LocalLoadPath", "Local.LoadPath" };
+
+        private void RenderGroup(AddressableAssetSettings settings, AddressableAssetGroup group)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+            var setup = GetGroupSetup(settings, group);
+
+            EditorGUILayout.BeginHorizontal();
+
+            EditorGUILayout.LabelField(group.Name, EditorStyles.boldLabel, GUILayout.MaxWidth(200));
+
+            GUILayout.FlexibleSpace();
+
+            switch (setup)
+            {
+                case GroupSetup.Remote:
+                {
+                    Rect checkRect = EditorGUILayout.GetControlRect(false, 20, GUILayout.Width(20));
+                    EditorGUI.DrawRect(checkRect, new Color(0.2f, 0.7f, 0.2f, 0.8f));
+                    EditorGUI.LabelField(checkRect, "✓", EditorStyles.centeredGreyMiniLabel);
+
+                    EditorGUILayout.LabelField("Remote (Balancy CDN)", EditorStyles.miniLabel, GUILayout.Width(130));
+
+                    if (GUILayout.Button("Switch to Local", GUILayout.Width(140)))
+                        ConfigureGroupAsLocal(group);
+                    break;
+                }
+                case GroupSetup.Legacy:
+                {
+                    GUIStyle warningStyle = new GUIStyle(EditorStyles.miniLabel);
+                    warningStyle.normal.textColor = new Color(0.9f, 0.6f, 0.1f); // Orange
+                    EditorGUILayout.LabelField("Legacy Load Path ({braces})", warningStyle, GUILayout.Width(160));
+
+                    if (GUILayout.Button("Update Path", GUILayout.Width(140)))
+                        CreateAndActivateCustomProfile(RemoteBuildPath, RemoteLoadPath);
+                    break;
+                }
+                case GroupSetup.Local:
+                {
+                    Rect checkRect = EditorGUILayout.GetControlRect(false, 20, GUILayout.Width(20));
+                    EditorGUI.DrawRect(checkRect, new Color(0.25f, 0.5f, 0.9f, 0.8f));
+                    EditorGUI.LabelField(checkRect, "✓", EditorStyles.centeredGreyMiniLabel);
+
+                    EditorGUILayout.LabelField("Local (in app build)", EditorStyles.miniLabel, GUILayout.Width(130));
+
+                    if (GUILayout.Button("Switch to Remote", GUILayout.Width(140)))
+                        ConfigureGroupForBalancy(group);
+                    break;
+                }
+                default:
+                {
+                    GUIStyle warningStyle = new GUIStyle(EditorStyles.miniLabel);
+                    warningStyle.normal.textColor = new Color(0.9f, 0.6f, 0.1f); // Orange
+                    EditorGUILayout.LabelField("Custom Configuration", warningStyle, GUILayout.Width(130));
+
+                    if (GUILayout.Button("Set Local", GUILayout.Width(80)))
+                        ConfigureGroupAsLocal(group);
+                    if (GUILayout.Button("Set Remote", GUILayout.Width(85)))
+                        ConfigureGroupForBalancy(group);
+                    break;
+                }
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            RenderGroupFiles(group);
+
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(5);
+        }
+
+        private void RenderGroupFiles(AddressableAssetGroup group)
+        {
+            var entries = group.entries;
+            if (entries == null)
+                return;
+
+            _expandedGroupFiles.TryGetValue(group.Guid, out bool expanded);
+            bool newExpanded = EditorGUILayout.Foldout(expanded, $"Assets: {entries.Count}", true);
+            if (newExpanded != expanded)
+                _expandedGroupFiles[group.Guid] = newExpanded;
+
+            if (!newExpanded)
+                return;
+
+            const int maxVisibleEntries = 100;
+            int shown = 0;
+            EditorGUI.indentLevel++;
+            foreach (var entry in entries)
+            {
+                if (shown++ >= maxVisibleEntries)
+                {
+                    EditorGUILayout.LabelField($"... and {entries.Count - maxVisibleEntries} more", EditorStyles.miniLabel);
+                    break;
+                }
+
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField(entry.address, EditorStyles.miniLabel, GUILayout.MaxWidth(250));
+                using (new EditorGUI.DisabledScope(true))
+                    EditorGUILayout.ObjectField(entry.MainAsset, typeof(UnityEngine.Object), false);
+                EditorGUILayout.EndHorizontal();
+            }
+            EditorGUI.indentLevel--;
+        }
+
+        private static GroupSetup GetGroupSetup(AddressableAssetSettings settings, AddressableAssetGroup group)
+        {
+            BundledAssetGroupSchema bundleSchema = group.GetSchema<BundledAssetGroupSchema>();
+            if (bundleSchema == null)
+                return GroupSetup.NoSchema;
+
+            var buildPathValue = bundleSchema.BuildPath.GetValue(settings) ?? string.Empty;
+            var loadPathValue = bundleSchema.LoadPath.GetValue(settings) ?? string.Empty;
+
+            bool usingRemoteBuildPaths = buildPathValue.StartsWith(BalancyDataRoot);
+            if (usingRemoteBuildPaths && loadPathValue.StartsWith(RemoteLoadPath))
+                return GroupSetup.Remote;
+            if (usingRemoteBuildPaths && loadPathValue.Contains("{"))
+                return GroupSetup.Legacy;
+
+            var buildPathName = bundleSchema.BuildPath.GetName(settings);
+            var loadPathName = bundleSchema.LoadPath.GetName(settings);
+
+            if (LocalBuildPathVariables.Contains(buildPathName) && LocalLoadPathVariables.Contains(loadPathName))
+                return GroupSetup.Local;
+
+            return GroupSetup.Custom;
+        }
+
+        private static void SetPathVariable(AddressableAssetSettings settings, ProfileValueReference reference,
+            string[] variableNames)
+        {
+            var allVariableNames = settings.profileSettings.GetVariableNames();
+            foreach (var v in variableNames)
+            {
+                if (allVariableNames.Contains(v))
+                {
+                    reference.SetVariableByName(settings, v);
+                    return;
+                }
+            }
+
+            Debug.LogError("Variable not found: " + variableNames[0]);
+        }
+
         private void ConfigureGroupForBalancy(AddressableAssetGroup group)
+        {
+            ConfigureGroupPaths(group, RemoteBuildPathVariables, RemoteLoadPathVariables, "Remote (Balancy)");
+        }
+
+        /// <summary>
+        /// Reverts the group to the default Unity local paths: the bundles are included
+        /// in the app build and are not uploaded to the Balancy server.
+        /// </summary>
+        private void ConfigureGroupAsLocal(AddressableAssetGroup group)
+        {
+            ConfigureGroupPaths(group, LocalBuildPathVariables, LocalLoadPathVariables, "Local");
+        }
+
+        private void ConfigureGroupPaths(AddressableAssetGroup group, string[] buildPathVariables,
+            string[] loadPathVariables, string setupName)
         {
             if (group == null) return;
 
@@ -224,65 +390,29 @@ namespace Balancy
             if (bundleSchema == null)
                 bundleSchema = group.AddSchema<BundledAssetGroupSchema>();
 
-            var allVariableNames = settings.profileSettings.GetVariableNames();
-
-            void SetBuildPathVariable(ProfileValueReference reference, string[] variableNames)
-            {
-                foreach (var v in variableNames)
-                {
-                    if (allVariableNames.Contains(v))
-                    {
-                        reference.SetVariableByName(settings, v);
-                        return;
-                    }
-                }
-
-                Debug.LogError("Variable not found: " + variableNames[0]);
-            }
-
-            SetBuildPathVariable(bundleSchema.BuildPath,
-                new string[] { AddressableAssetSettings.kRemoteBuildPath, "RemoteBuildPath", "Remote.BuildPath" });
-
-            SetBuildPathVariable(bundleSchema.LoadPath,
-                new string[] { AddressableAssetSettings.kRemoteLoadPath, "RemoteLoadPath", "Remote.LoadPath" });
+            SetPathVariable(settings, bundleSchema.BuildPath, buildPathVariables);
+            SetPathVariable(settings, bundleSchema.LoadPath, loadPathVariables);
 
             bundleSchema.IncludeInBuild = true;
 
+            EditorUtility.SetDirty(bundleSchema);
             EditorUtility.SetDirty(group);
             EditorUtility.SetDirty(settings);
             AssetDatabase.SaveAssets();
 
-            Debug.Log($"Group '{group.Name}' configured for Balancy");
+            Debug.Log($"Group '{group.Name}' configured as {setupName}");
         }
-        
+
         private void ConfigureCatalogForBalancy()
         {
             var settings = AddressableAssetSettingsDefaultObject.Settings;
             settings.BuildRemoteCatalog = true;
-            
-            var allVariableNames = settings.profileSettings.GetVariableNames();
-            
-            void SetBuildPathVariable(ProfileValueReference reference, string[] variableNames)
-            {
-                foreach (var v in variableNames)
-                {
-                    if (allVariableNames.Contains(v))
-                    {
-                        reference.SetVariableByName(settings, v);
-                        return;
-                    }
-                }
-
-                Debug.LogError("Variable not found: " + variableNames[0]);
-            }
 
             settings.RemoteCatalogBuildPath = new ProfileValueReference();
-            SetBuildPathVariable(settings.RemoteCatalogBuildPath,
-                new string[] { AddressableAssetSettings.kRemoteBuildPath, "RemoteBuildPath", "Remote.BuildPath" });
+            SetPathVariable(settings, settings.RemoteCatalogBuildPath, RemoteBuildPathVariables);
 
             settings.RemoteCatalogLoadPath = new ProfileValueReference();
-            SetBuildPathVariable(settings.RemoteCatalogLoadPath,
-                new string[] { AddressableAssetSettings.kRemoteLoadPath, "RemoteLoadPath", "Remote.LoadPath" });
+            SetPathVariable(settings, settings.RemoteCatalogLoadPath, RemoteLoadPathVariables);
 
             EditorUtility.SetDirty(settings);
             AssetDatabase.SaveAssets();
@@ -297,11 +427,61 @@ namespace Balancy
 
                 if (disableUI)
                     EditorGUILayout.HelpBox("Complete the previous Step to unlock this section", MessageType.Info);
+                else
+                    RenderBuildSummary();
 
                 DrawBuildPipeline();
             }
 
             EditorGUILayout.EndVertical();
+        }
+
+        private void RenderBuildSummary()
+        {
+            var settings = AddressableAssetSettingsDefaultObject.Settings;
+            if (settings == null || settings.groups == null)
+                return;
+
+            int remoteGroups = 0, remoteAssets = 0;
+            int localGroups = 0, localAssets = 0;
+            int customGroups = 0, customAssets = 0;
+
+            foreach (var group in settings.groups)
+            {
+                if (group == null || ShouldExcludeGroup(group))
+                    continue;
+
+                int count = group.entries?.Count ?? 0;
+                switch (GetGroupSetup(settings, group))
+                {
+                    case GroupSetup.Remote:
+                    case GroupSetup.Legacy:
+                        remoteGroups++;
+                        remoteAssets += count;
+                        break;
+                    case GroupSetup.Local:
+                        localGroups++;
+                        localAssets += count;
+                        break;
+                    default:
+                        customGroups++;
+                        customAssets += count;
+                        break;
+                }
+            }
+
+            EditorGUILayout.HelpBox(
+                $"Remote: {remoteGroups} group(s), {remoteAssets} asset(s) — uploaded to Balancy CDN.\n" +
+                $"Local: {localGroups} group(s), {localAssets} asset(s) — included in the app build, not uploaded.",
+                MessageType.Info);
+
+            if (customGroups > 0)
+            {
+                EditorGUILayout.HelpBox(
+                    $"{customGroups} group(s) with {customAssets} asset(s) have a custom configuration. " +
+                    "They will be built with their own paths. Set them to Local or Remote in Step 3 to manage them with Balancy.",
+                    MessageType.Warning);
+            }
         }
 
         /// <summary>
@@ -367,6 +547,32 @@ namespace Balancy
             string customProfileId = settings.profileSettings.GetProfileId(CustomProfileName);
 
             return activeProfileId == customProfileId;
+        }
+
+        private static string GetProfileRemoteLoadPath(AddressableAssetSettings settings)
+        {
+            if (settings == null)
+                return null;
+
+            var profileId = settings.profileSettings.GetProfileId(CustomProfileName);
+            if (string.IsNullOrEmpty(profileId))
+                return null;
+
+            var allVariableNames = settings.profileSettings.GetVariableNames();
+            string[] candidates = { AddressableAssetSettings.kRemoteLoadPath, "RemoteLoadPath", "Remote.LoadPath" };
+            foreach (var v in candidates)
+            {
+                if (allVariableNames.Contains(v))
+                    return settings.profileSettings.GetValueByName(profileId, v);
+            }
+
+            return null;
+        }
+
+        private static bool HasLegacyLoadPath(AddressableAssetSettings settings)
+        {
+            var value = GetProfileRemoteLoadPath(settings);
+            return value != null && value.Contains("{");
         }
 
         private static string GetBuildPath()
@@ -559,7 +765,22 @@ namespace Balancy
         {
             return UnityWebRequest.EscapeURL(branchName);
         }
-        
+
+        private void CallDeploy(GameInfo gameInfo, Action<bool, string> callback)
+        {
+            var request = _wrapper.CreateRequest(
+                $"/v1/games/{gameInfo.GameId}/branches/{ConvertBranchName(gameInfo.BranchName)}/deploy",
+                "POST");
+            _wrapper.SendRequest(request, response =>
+            {
+                var success = response.result == UnityWebRequest.Result.Success;
+                string error = success ? null : response.error;
+                if (!success)
+                    Debug.LogError("Deploy failed: " + error);
+                callback?.Invoke(success, error);
+            });
+        }
+
         private void SendInfoToServer(FullInfo info, GameInfo gameInfo, Action<bool> callback)
         {
             var request = _wrapper.CreateRequest($"/v1/games/{gameInfo.GameId}/branches/{ConvertBranchName(gameInfo.BranchName)}/bundles", "POST");
@@ -872,6 +1093,7 @@ namespace Balancy
         private string _currentStepDetails = "";
 
         private GameInfo _gameInfo;
+        private bool _completionNotified;
 
         private void DeleteUpFolder()
         {
@@ -929,8 +1151,8 @@ namespace Balancy
                 {
                     complete = true;
                     success = _success;
-
-                    if (success)
+                    
+                    if (success && !_deployAfterSync)
                         _gameInfo.OnComplete?.Invoke(null);
                 });
                 
@@ -940,6 +1162,37 @@ namespace Balancy
                 if (!success)
                 {
                     _currentStepDetails = "Sync Assets failed!";
+                    _currentBuildStep = BuildStep.Error;
+                    EditorApplication.update -= UpdateBuildProgress;
+                    Repaint();
+                    return;
+                }
+            }
+
+            if (_deployAfterSync)
+            {
+                _currentStepDetails = "Deploying...";
+                bool deployComplete = false;
+                bool deploySuccess = false;
+                string deployError = null;
+                CallDeploy(_gameInfo, (s, error) =>
+                {
+                    deployComplete = true;
+                    deploySuccess = s;
+                    deployError = error;
+                });
+
+                while (!deployComplete)
+                    await Task.Delay(100);
+
+                if (deploySuccess)
+                {
+                    _gameInfo.OnComplete?.Invoke(null);
+                }
+                else
+                {
+                    _gameInfo.OnComplete?.Invoke(deployError);
+                    _currentStepDetails = "Deploy failed!";
                     _currentBuildStep = BuildStep.Error;
                     EditorApplication.update -= UpdateBuildProgress;
                     Repaint();
@@ -1013,6 +1266,19 @@ namespace Balancy
 
             EditorGUILayout.Space();
 
+            if (_currentBuildStep == BuildStep.NotStarted)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                _deployAfterSync = EditorGUILayout.ToggleLeft("Deploy after sync", _deployAfterSync, GUILayout.Width(120));
+                var helpIcon = EditorGUIUtility.IconContent("_Help");
+                var helpRect = GUILayoutUtility.GetRect(helpIcon, GUIStyle.none, GUILayout.Width(36), GUILayout.Height(24));
+                GUI.Label(helpRect, new GUIContent(helpIcon.image, "It will start deploy process on the Balancy's dashboard and will deploy all changes after sync. Be careful."));
+                GUILayout.FlexibleSpace();
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.Space();
+            }
+
             // Start or reset button
             EditorGUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
@@ -1021,9 +1287,21 @@ namespace Balancy
             {
                 if (_currentBuildStep != BuildStep.Completed)
                 {
-                    if (GUILayout.Button("Start Build",
-                            GUILayout.Width(120)))
-                        StartBuildProcess();
+                    if (!IsIL2CPPBackendInstalled())
+                    {
+                        EditorGUILayout.HelpBox(
+                            "IL2CPP scripting backend is not installed for " +
+                            EditorUserBuildSettings.activeBuildTarget +
+                            ". Please install the IL2CPP module via Unity Hub.",
+                            MessageType.Error);
+                        if (GUILayout.Button("Install IL2CPP Module...", GUILayout.Width(200)))
+                            OpenUnityHub();
+                    }
+                    else
+                    {
+                        if (GUILayout.Button("Start Build", GUILayout.Width(120)))
+                            StartBuildProcess();
+                    }
                 }
             }
             else
@@ -1112,6 +1390,79 @@ namespace Balancy
 
         #endregion
         
+        private static bool IsIL2CPPBackendInstalled()
+        {
+            var target = EditorUserBuildSettings.activeBuildTarget;
+            var targetGroup = BuildPipeline.GetBuildTargetGroup(target);
+#if UNITY_2021_2_OR_NEWER
+            var backend = PlayerSettings.GetScriptingBackend(NamedBuildTarget.FromBuildTargetGroup(targetGroup));
+#else
+            var backend = PlayerSettings.GetScriptingBackend(targetGroup);
+#endif
+
+            if (backend != ScriptingImplementation.IL2CPP)
+                return true;
+
+            string playbackEnginesPath = Path.Combine(EditorApplication.applicationContentsPath, "PlaybackEngines");
+            string variationsFolder = null;
+
+            switch (target)
+            {
+                case BuildTarget.StandaloneWindows:
+                case BuildTarget.StandaloneWindows64:
+                    variationsFolder = Path.Combine(playbackEnginesPath, "windowsstandalonesupport", "Variations");
+                    break;
+                case BuildTarget.StandaloneOSX:
+                    variationsFolder = Path.Combine(playbackEnginesPath, "MacStandaloneSupport", "Variations");
+                    break;
+                case BuildTarget.StandaloneLinux64:
+                    variationsFolder = Path.Combine(playbackEnginesPath, "LinuxStandaloneSupport", "Variations");
+                    break;
+                default:
+                    return true;
+            }
+
+            if (variationsFolder != null && Directory.Exists(variationsFolder))
+                return Directory.GetDirectories(variationsFolder, "*il2cpp*").Length > 0;
+
+            return false;
+        }
+
+        private static void OpenUnityHub()
+        {
+            string[] possiblePaths;
+
+            if (Application.platform == RuntimePlatform.WindowsEditor)
+            {
+                possiblePaths = new[]
+                {
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Unity Hub", "Unity Hub.exe"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Unity Hub", "Unity Hub.exe"),
+                };
+            }
+            else if (Application.platform == RuntimePlatform.OSXEditor)
+            {
+                possiblePaths = new[] { "/Applications/Unity Hub.app/Contents/MacOS/Unity Hub" };
+            }
+            else
+            {
+                possiblePaths = new[] { "/usr/bin/unityhub" };
+            }
+
+            foreach (var path in possiblePaths)
+            {
+                if (File.Exists(path))
+                {
+                    System.Diagnostics.Process.Start(path);
+                    return;
+                }
+            }
+
+            EditorUtility.DisplayDialog("Unity Hub Not Found",
+                "Please open Unity Hub manually and install the IL2CPP module for Unity " + Application.unityVersion + ".",
+                "OK");
+        }
+
         public static Balancy.Constants.DevicePlatform ConvertBuildTargetToDevicePlatform(BuildTarget target)
         {
             switch (target)
